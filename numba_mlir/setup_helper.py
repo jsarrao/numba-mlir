@@ -154,7 +154,7 @@ def build_runtime(install_dir):
 
     python_path = sys.executable
     cmake_cmd += [
-        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_BUILD_TYPE=Debug",
         "-DLLVM_DIR=" + LLVM_DIR,
         "-DMLIR_DIR=" + MLIR_DIR,
         "-DCMAKE_INSTALL_PREFIX=" + CMAKE_INSTALL_PREFIX,

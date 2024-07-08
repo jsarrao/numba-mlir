@@ -42,7 +42,7 @@ struct ExpandTupleReturn
     auto loc = op.getLoc();
     flattenTuple(rewriter, loc, adaptor.getOperands(), newOperands);
     auto *operation = op.getOperation();
-    rewriter.updateRootInPlace(op,
+    rewriter.modifyOpInPlace(op,
                                [&]() { operation->setOperands(newOperands); });
     return mlir::success();
   }

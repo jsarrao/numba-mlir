@@ -17,6 +17,7 @@
 #include <mlir/Dialect/Complex/IR/Complex.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Func/Transforms/Passes.h>
+#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
 #include <mlir/Dialect/Linalg/IR/Linalg.h>
 #include <mlir/Dialect/Linalg/Passes.h>
 #include <mlir/Dialect/Linalg/Transforms/Transforms.h>
@@ -40,6 +41,13 @@
 #include "pipelines/PlierToScf.hpp"
 #include "pipelines/PlierToStd.hpp"
 #include "pipelines/PreLowSimplifications.hpp"
+
+
+#include "numba/Conversion/MathExtToLibm.hpp"
+#include "numba/Conversion/UtilToLlvm.hpp"
+
+#include "numba/Transforms/FuncUtils.hpp"
+#include "numba/Utils.hpp"
 
 #include "numba/Analysis/AliasAnalysis.hpp"
 #include "numba/Compiler/PipelineRegistry.hpp"
@@ -75,6 +83,8 @@
 #include "PyLinalgResolver.hpp"
 
 #include <cctype>
+#include <tuple>
+#include <variant>
 
 namespace {
 static numba::util::EnvironmentRegionOp
@@ -2279,13 +2289,34 @@ struct UnaryOpsLowering
   }
 };
 
+bool isFloatType(mlir::Type type) {
+  return type.isF16() || type.isF32() || type.isF64();
+}
+
+mlir::Type getFloatTypeFromBitWidth(unsigned width,
+                                    mlir::PatternRewriter &rewriter) {
+  switch (width) {
+  case 16:
+    return rewriter.getF16Type();
+    break;
+  case 32:
+    return rewriter.getF32Type();
+    break;
+  case 64:
+    return rewriter.getF64Type();
+    break;
+  default:
+    return rewriter.getF64Type();
+    break;
+  }
+}
+
 struct BinOpsLowering
     : public mlir::OpRewritePattern<numba::ntensor::BinaryOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  mlir::LogicalResult
-  matchAndRewrite(numba::ntensor::BinaryOp op,
-                  mlir::PatternRewriter &rewriter) const override {
+  mlir::LogicalResult defaultLowering(numba::ntensor::BinaryOp op,
+                                      mlir::PatternRewriter &rewriter) const {
     auto name = op.getOp();
     for (auto it : plier::getOperators()) {
       if (it.op == name) {
@@ -2298,7 +2329,276 @@ struct BinOpsLowering
     }
     return mlir::failure();
   }
+
+  mlir::Value createCorrectZero(mlir::Type type,
+                                mlir::PatternRewriter &rewriter,
+                                mlir::Location loc) const {
+    mlir::Value retVal;
+    if (isFloatType(type)) {
+      retVal = rewriter.create<mlir::arith::ConstantOp>(
+          loc, type, rewriter.getFloatAttr(type, 0.0));
+    } else {
+      unsigned width = type.getIntOrFloatBitWidth();
+      mlir::Type newType = rewriter.getIntegerType(width);
+      retVal = rewriter.create<mlir::arith::ConstantOp>(
+          loc, newType, rewriter.getIntegerAttr(newType, 0));
+      retVal = rewriter.create<numba::util::SignCastOp>(loc, type, retVal);
+    }
+    return retVal;
+  }
+
+  mlir::Value fixTypeAndWidth(mlir::Type resType, mlir::Value inOp,
+                              mlir::OpBuilder &b, mlir::Location loc) const {
+    mlir::Value retVal = inOp;
+    if (isFloatType(resType)) {
+      if (!isFloatType(retVal.getType())) {
+        retVal = b.create<numba::util::SignCastOp>(
+            loc, b.getIntegerType(retVal.getType().getIntOrFloatBitWidth()),
+            retVal);
+        retVal = b.create<mlir::arith::SIToFPOp>(loc, resType, retVal);
+      } else if (retVal.getType().getIntOrFloatBitWidth() !=
+                 resType.getIntOrFloatBitWidth()) {
+        retVal = b.create<mlir::arith::ExtFOp>(loc, resType, retVal);
+      }//else if (retVal.getType().getIntOrFloatBitWidth() >
+      //            resType.getIntOrFloatBitWidth()) {
+      //   retVal = b.create<mlir::arith::TruncFOp>(loc, resType, retVal);
+      // }
+    } else {
+      // if (isFloatType(retVal.getType())) {
+      //   retVal = b.create<mlir::arith::FPToSIOp>(loc, resType, retVal);
+      // }
+      retVal = b.create<numba::util::SignCastOp>(
+          loc, b.getIntegerType(retVal.getType().getIntOrFloatBitWidth()),
+          retVal);
+      if (retVal.getType().getIntOrFloatBitWidth() !=
+          resType.getIntOrFloatBitWidth()) {
+        retVal = b.create<mlir::arith::ExtSIOp>(
+            loc, b.getIntegerType(resType.getIntOrFloatBitWidth()), retVal);
+      }// else if (retVal.getType().getIntOrFloatBitWidth() >
+      //     resType.getIntOrFloatBitWidth()) {
+      //   retVal = b.create<mlir::arith::TruncIOp>(
+      //       loc, resType, retVal);
+      // }
+    }
+    return retVal;
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(numba::ntensor::BinaryOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+
+    using NTensor = numba::ntensor::NTensorType;
+    rewriter.setInsertionPoint(op);
+    auto uLoc = rewriter.getUnknownLoc();
+
+    // llvm::errs() << op.getLoc() << '\n';
+    // llvm::errs() << *(op->getParentOp()) << '\n';
+
+    // return defaultLowering(op, rewriter);
+
+    // use default lowering unless +, -, *, or -
+    auto opName = op.getOp();
+    if (opName == "<" || opName == ">" || opName == "|" || opName == "&" ||
+        opName == "<=" || opName == ">=" || opName == "==" || opName == "!=" ||
+        opName == "^" || opName == "**" || opName == "@" || opName == "*") {
+      return defaultLowering(op, rewriter);
+    }
+
+    // determine whether lhs and rhs are ntensor or scalars as well as number
+    // type
+    auto lhsNTensorType =
+        mlir::dyn_cast<NTensor>(op.getLhs().getType());
+    auto rhsNTensorType =
+        mlir::dyn_cast<NTensor>(op.getRhs().getType());
+    auto lhsDType = (lhsNTensorType) ? lhsNTensorType.getElementType()
+                                     : op.getLhs().getType();
+    auto rhsDType = (rhsNTensorType) ? rhsNTensorType.getElementType()
+                                     : op.getRhs().getType();
+
+    // use default lowering if:
+    //   l/rhs use bool or any other type
+    //   l/rhs are both ntensors but different shape
+    //   any issue getting types
+    if (lhsDType == rewriter.getIntegerType(1) ||
+        rhsDType == rewriter.getIntegerType(1) || !rhsDType.isIntOrFloat() ||
+        !lhsDType.isIntOrFloat() ||
+        (lhsNTensorType && rhsNTensorType &&
+         rhsNTensorType.getShape() != lhsNTensorType.getShape()) ||
+        rhsDType == NULL || lhsDType == NULL) {
+      return defaultLowering(op, rewriter);
+    }
+
+    // pick example ntensor type from l/rhs to copy for the result ntensor
+    NTensor srcType =
+        (lhsNTensorType) ? lhsNTensorType : rhsNTensorType;
+    llvm::ArrayRef<int64_t> ntensorShape = srcType.getShape();
+    mlir::Attribute environment = srcType.getEnvironment();
+    mlir::StringAttr layout = rewriter.getStringAttr("C");
+    // srcType.getLayout();
+
+    // determine the bitwidth of element type in result ntensor
+    unsigned width =
+        (lhsDType.getIntOrFloatBitWidth() > rhsDType.getIntOrFloatBitWidth()) // (lhsNTensorType && rhsNTensorType && lhsDType.getIntOrFloatBitWidth() > rhsDType.getIntOrFloatBitWidth()) || (lhsNTensorType && !rhsNTensorType)
+            ? lhsDType.getIntOrFloatBitWidth()
+            : rhsDType.getIntOrFloatBitWidth();
+
+    // determine type of resulting ntensor
+    NTensor resNTensorType;
+    if (isFloatType(lhsDType) || isFloatType(rhsDType)) { // (lhsNTensorType && isFloatType(lhsDType)) || (rhsNTensorType && isFloatType(rhsDType))
+      resNTensorType =
+          NTensor::get(ntensorShape, getFloatTypeFromBitWidth(width, rewriter),
+                       environment, layout);
+    } else {
+      resNTensorType =
+          NTensor::get(ntensorShape, rewriter.getIntegerType(width, true),
+                       environment, layout);
+    }
+
+    // create properly typed 0 for initializing result ntensor, and create
+    // constants for 0 and 1 for loop lower bound and step
+    mlir::Value zero =
+        createCorrectZero(resNTensorType.getElementType(), rewriter, uLoc);
+    auto index = rewriter.create<mlir::arith::ConstantOp>(
+        uLoc, rewriter.getIndexType(), rewriter.getIndexAttr((int64_t)0));
+    auto step = rewriter.create<mlir::arith::ConstantOp>(
+        uLoc, rewriter.getIndexType(), rewriter.getIndexAttr((int64_t)1));
+
+    // find dynamic dimensions and create values to be used as loop paramaters
+    mlir::SmallVector<mlir::Value> dynamicDims;
+    mlir::SmallVector<mlir::Value> lowerBounds;
+    mlir::SmallVector<mlir::Value> upperBounds;
+    mlir::SmallVector<mlir::Value> steps;
+    for (auto i : llvm::seq(size_t(0), resNTensorType.getShape().size())) {
+      if (resNTensorType.isDynamicDim(i)) {
+        numba::ntensor::DimOp dimOp;
+        if (lhsNTensorType) {
+          dimOp = rewriter.create<numba::ntensor::DimOp>(uLoc, op.getLhs(), i);
+        } else {
+          dimOp = rewriter.create<numba::ntensor::DimOp>(uLoc, op.getRhs(), i);
+        }
+
+        // auto dimInt = rewriter.create<mlir::arith::IndexCastOp>(uLoc, rewriter.getI64Type(), dimOp);
+        // auto ptrType = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
+        // auto funcType = mlir::LLVM::LLVMFunctionType::get(ptrType, {rewriter.getI64Type()});
+        // mlir::StringRef funcName = "mlirPrintI64";
+        // if (mlir::ModuleOp mod = mlir::dyn_cast<mlir::ModuleOp>(op->getParentOp()->getParentOp())) {
+        //   llvm::errs() << "module op found\n";
+        //   auto func = numba::getOrInserLLVMFunc(rewriter, mod, funcName, funcType);
+        //   rewriter.create<mlir::LLVM::CallOp>(uLoc, func, mlir::ValueRange({dimInt}));
+        // }
+        
+
+
+        dynamicDims.push_back(dimOp.getResult());
+        upperBounds.push_back(dimOp.getResult());
+      } else {
+        upperBounds.push_back(rewriter.create<mlir::arith::ConstantOp>(uLoc, rewriter.getIndexType(), rewriter.getIndexAttr((int64_t) resNTensorType.getDimSize(i))));
+      }
+      lowerBounds.push_back(index);
+      steps.push_back(step);
+    }
+
+    // create result ntensor
+    auto resNTens = rewriter.create<numba::ntensor::CreateArrayOp>(
+        uLoc, resNTensorType, dynamicDims, zero);
+
+    // create parallel loop
+    rewriter.create<mlir::scf::ParallelOp>(
+        uLoc, mlir::ValueRange(lowerBounds), mlir::ValueRange(upperBounds),
+        mlir::ValueRange(steps),
+        [&](mlir::OpBuilder &b, mlir::Location loc, mlir::ValueRange ivs) {
+          // load from l/rhs if needed and create necessary casts/bitwidth
+          // extensions
+          mlir::Value lhsVal =
+              (lhsNTensorType)
+                  ? b.create<numba::ntensor::LoadOp>(loc, op.getLhs(), ivs)
+                  : op.getLhs();
+          mlir::Value rhsVal =
+              (rhsNTensorType)
+                  ? b.create<numba::ntensor::LoadOp>(loc, op.getRhs(), ivs)
+                  : op.getRhs();
+          lhsVal =
+              fixTypeAndWidth(resNTensorType.getElementType(), lhsVal, b, loc);
+          rhsVal =
+              fixTypeAndWidth(resNTensorType.getElementType(), rhsVal, b, loc);
+
+          // create arithmatic operation and store in result array
+          mlir::Value result;
+          if (isFloatType(resNTensorType.getElementType())) {
+            if (opName == "+") {
+              result = b.create<mlir::arith::AddFOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "-") {
+              result = b.create<mlir::arith::SubFOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "*") {
+              result = b.create<mlir::arith::MulFOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "/") {
+              result = b.create<mlir::arith::DivFOp>(loc, lhsVal, rhsVal);
+            }
+          } else {
+            if (opName == "+") {
+              result = b.create<mlir::arith::AddIOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "-") {
+              result = b.create<mlir::arith::SubIOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "*") {
+              result = b.create<mlir::arith::MulIOp>(loc, lhsVal, rhsVal);
+            } else if (opName == "/") {
+              result = b.create<mlir::arith::DivSIOp>(loc, lhsVal, rhsVal);
+            }
+            // if integer need to cast back to signed int
+            result = b.create<numba::util::SignCastOp>(
+                loc, resNTensorType.getElementType(), result);
+          }
+          b.create<numba::ntensor::StoreOp>(loc, result, resNTens, ivs);
+        });
+
+    rewriter.replaceOp(op, resNTens);
+    return mlir::success();
+  }
 };
+
+// TODO: Check if this pass is necessary, numba-mlir seems to fuse scf
+// just fine on its own, but need to verify to be sure
+
+// struct MoveNtensorCreatePass : public
+// mlir::PassWrapper<MoveNtensorCreatePass, mlir::OperationPass<void>> {
+//   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MoveNtensorCreatePass)
+
+//   virtual void getDependentDialects(mlir::DialectRegistry &registry) const
+//   override {
+//     registry.insert<mlir::bufferization::BufferizationDialect>();
+//     registry.insert<mlir::linalg::LinalgDialect>();
+//     registry.insert<mlir::memref::MemRefDialect>();
+//     registry.insert<mlir::tensor::TensorDialect>();
+//     registry.insert<mlir::scf::SCFDialect>();
+//     registry.insert<mlir::arith::ArithDialect>();
+//     registry.insert<mlir::ub::UBDialect>();
+//     registry.insert<numba::ntensor::NTensorDialect>();
+//     registry.insert<numba::util::NumbaUtilDialect>();
+//   }
+
+//   void runOnOperation() override {
+//     numba::ntensor::CreateArrayOp lastOp;
+//     getOperation()->walk([&](numba::ntensor::CreateArrayOp op) {
+//       if (lastOp != NULL) {
+//         op->moveAfter(lastOp);
+//         lastOp = op;
+//       } else {
+//         for (auto oper : op->getOperands()) {
+//           auto dop = oper.getDefiningOp();
+//           if (mlir::isa<numba::ntensor::DimOp>(dop)) {
+//             op->moveAfter(dop);
+//             llvm::errs() << "op moved\n";
+//           }
+//           lastOp = op;
+//         }
+//         // mlir::Value dimOp = op.getOperand(0);
+//         // auto dop = dimOp.getDefiningOp();
+//         // op->moveAfter(dop);
+//         // lastOp = op;
+//       }
+//     });
+//   }
+// };
 
 struct ResolveNtensorPass
     : public mlir::PassWrapper<ResolveNtensorPass, mlir::OperationPass<void>> {
@@ -2310,7 +2610,9 @@ struct ResolveNtensorPass
     registry.insert<mlir::linalg::LinalgDialect>();
     registry.insert<mlir::memref::MemRefDialect>();
     registry.insert<mlir::tensor::TensorDialect>();
-    registry.insert<mlir::ub::UBDialect>();
+    registry.insert<mlir::scf::SCFDialect>();
+    registry.insert<mlir::arith::ArithDialect>();
+    registry.insert<mlir::LLVM::LLVMDialect>();
     registry.insert<numba::ntensor::NTensorDialect>();
     registry.insert<numba::util::NumbaUtilDialect>();
   }
@@ -4436,7 +4738,10 @@ static void populatePlierToLinalgGenPipeline(mlir::OpPassManager &pm) {
   pm.addPass(std::make_unique<MarkArgsRestrictPass>());
   pm.addPass(std::make_unique<PlierToNtensorPass>());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createPrintIRPass());
   pm.addPass(std::make_unique<ResolveNumpyFuncsPass>());
+  
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createPrintIRPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
   pm.addNestedPass<mlir::func::FuncOp>(numba::createCopyRemovalPass());
   populateCommonOptPass(pm);
@@ -4452,6 +4757,14 @@ static void populatePlierToLinalgGenPipeline(mlir::OpPassManager &pm) {
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addNestedPass<mlir::func::FuncOp>(numba::createNtensorAliasAnalysisPass());
   pm.addNestedPass<mlir::func::FuncOp>(numba::createNtensorToLinalgPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createPrintIRPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToParallelLoopsPass());
+  // pm.addPass(std::make_unique<MoveNtensorCreatePass>());
+  // pm.addNestedPass<mlir::func::FuncOp>(
+  //     std::make_unique<MoveNtensorCreatePass>());
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createPrintIRPass());
+  // pm.addPass(mlir::createParallelLoopFusionPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(mlir::createPrintIRPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       numba::createNtensorLowerToTensorCopyPass());
   pm.addNestedPass<mlir::func::FuncOp>(numba::createCopyRemovalPass());

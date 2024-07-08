@@ -26,6 +26,7 @@ metadata = dict(
     packages=packages,
     install_requires=["numba>=0.57,<0.59"],
     include_package_data=True,
+    extra_compile_args=['-g -O0']
 )
 
 setup(**metadata)

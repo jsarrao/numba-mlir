@@ -929,7 +929,7 @@ struct ChangeLayoutIf : public mlir::OpRewritePattern<mlir::scf::YieldOp> {
                                                           dstType, src);
             }
 
-            rewriter.updateRootInPlace(clYield,
+            rewriter.modifyOpInPlace(clYield,
                                        [&]() { clYield.setOperand(i, src); });
 
             rewriter.setInsertionPoint(otherYield);

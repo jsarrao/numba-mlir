@@ -378,11 +378,11 @@ struct HoistBufferAllocsPass
 static void populateParallelToTbbPipeline(mlir::OpPassManager &pm) {
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::createLoopInvariantCodeMotionPass());
-  pm.addNestedPass<mlir::func::FuncOp>(std::make_unique<ParallelToTbbPass>());
+  // pm.addNestedPass<mlir::func::FuncOp>(std::make_unique<ParallelToTbbPass>());
   pm.addNestedPass<mlir::func::FuncOp>(
       std::make_unique<HoistBufferAllocsPass>());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::func::FuncOp>(numba::createSCFVectorizePass());
+  // pm.addNestedPass<mlir::func::FuncOp>(numba::createSCFVectorizePass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
 }

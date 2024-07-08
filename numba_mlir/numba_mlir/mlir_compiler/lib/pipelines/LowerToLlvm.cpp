@@ -65,7 +65,8 @@ static const bool ensureUniqueAllocPtr = true;
 namespace {
 static mlir::LowerToLLVMOptions getLLVMOptions(mlir::MLIRContext &context) {
   static llvm::DataLayout dl = []() {
-    llvm::InitializeNativeTarget();
+    llvm::InitializeAllTargets();
+    
     auto triple = llvm::sys::getProcessTriple();
     std::string errStr;
     auto target = llvm::TargetRegistry::lookupTarget(triple, errStr);

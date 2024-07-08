@@ -1294,7 +1294,6 @@ static void createPipeline(numba::PipelineRegistry &registry,
   registerBasePipeline(registry);
 
   registerLowerToLLVMPipeline(registry);
-
   registerPlierToScfPipeline(registry);
 
   populateStdTypeConverter(converter);
@@ -1382,9 +1381,10 @@ struct GlobalCompilerContext {
 
 private:
   numba::ExecutionEngineOptions getOpts(const py::dict &settings) const {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmPrinters();
+    llvm::InitializeAllAsmParsers();
 
     numba::ExecutionEngineOptions opts;
     opts.symbolMap =

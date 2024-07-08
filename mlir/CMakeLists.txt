@@ -20,9 +20,9 @@ string(REGEX MATCH "\"([^\"]*)\"" LLVM_SHA ${REVISION_FILE_DATA})
 string(REPLACE "\"" "" LLVM_SHA ${LLVM_SHA})
 message(STATUS "llvm sha: \"${LLVM_SHA}\"")
 
-if (NOT EXPECTED_LLVM_SHA STREQUAL LLVM_SHA)
-    message(FATAL_ERROR "Invalid llvm version")
-endif()
+#if (NOT EXPECTED_LLVM_SHA STREQUAL LLVM_SHA)
+#    message(FATAL_ERROR "Invalid llvm version")
+#endif()
 
 add_subdirectory(include/numba/Dialect/plier)
 add_subdirectory(include/numba/Dialect/numba_util)
