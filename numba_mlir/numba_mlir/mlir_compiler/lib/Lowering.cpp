@@ -1294,6 +1294,7 @@ static void createPipeline(numba::PipelineRegistry &registry,
   registerBasePipeline(registry);
 
   registerLowerToLLVMPipeline(registry);
+
   registerPlierToScfPipeline(registry);
 
   populateStdTypeConverter(converter);

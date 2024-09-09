@@ -20,6 +20,7 @@ string(REGEX MATCH "\"([^\"]*)\"" LLVM_SHA ${REVISION_FILE_DATA})
 string(REPLACE "\"" "" LLVM_SHA ${LLVM_SHA})
 message(STATUS "llvm sha: \"${LLVM_SHA}\"")
 
+# commented out to build with kitsune llvm instead of specified version
 #if (NOT EXPECTED_LLVM_SHA STREQUAL LLVM_SHA)
 #    message(FATAL_ERROR "Invalid llvm version")
 #endif()

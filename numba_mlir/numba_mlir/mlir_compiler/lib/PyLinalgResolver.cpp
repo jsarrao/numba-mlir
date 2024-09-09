@@ -1462,6 +1462,69 @@ static py::object arrayTypeImpl(py::capsule context, py::iterable dims,
   return ctx.context.createType(arrayType);
 }
 
+static py::object lowerExpImpl(py::capsule context, py::handle ntensor) {
+  // lowering for np.exp()
+  // same pattern as main lowering in pipelines/PlierToLinalg.cpp
+  auto &ctx = getPyContext(context);
+  auto loc = ctx.loc;
+  auto &builder = ctx.builder;
+  auto nTensorVal = ctx.context.unwrapVal(loc, builder, ntensor);
+
+  auto srcType = mlir::dyn_cast<numba::ntensor::NTensorType>(nTensorVal.getType());
+  if (!srcType) {
+    llvm::errs() << "Error getting source ntensor type in exp lowering\n";
+  }
+  llvm::ArrayRef<int64_t> ntensorShape = srcType.getShape();
+  mlir::Attribute environment = srcType.getEnvironment();
+  mlir::StringAttr layout = builder.getStringAttr("C");
+
+  auto resNTensorType = numba::ntensor::NTensorType::get(ntensorShape, builder.getF64Type(), environment, layout);
+  mlir::Value floatZero = builder.create<mlir::arith::ConstantOp>(loc, builder.getF64Type(), builder.getFloatAttr(builder.getF64Type(), 0.0));
+  auto index = builder.create<mlir::arith::ConstantOp>(loc, builder.getIndexType(), builder.getIndexAttr((int64_t)0));
+  auto step = builder.create<mlir::arith::ConstantOp>(loc, builder.getIndexType(), builder.getIndexAttr((int64_t)1));
+
+  mlir::SmallVector<mlir::Value> dynamicDims;
+  mlir::SmallVector<mlir::Value> lowerBounds;
+  mlir::SmallVector<mlir::Value> upperBounds;
+  mlir::SmallVector<mlir::Value> steps;
+  for (auto i : llvm::seq(size_t(0), resNTensorType.getShape().size())) {
+    if (resNTensorType.isDynamicDim(i)) {
+      numba::ntensor::DimOp dimOp = builder.create<numba::ntensor::DimOp>(loc, nTensorVal, i);
+      dynamicDims.push_back(dimOp.getResult());
+      upperBounds.push_back(dimOp.getResult());
+    } else {
+      upperBounds.push_back(builder.create<mlir::arith::ConstantOp>(
+          loc, builder.getIndexType(),
+          builder.getIndexAttr((int64_t) resNTensorType.getDimSize(i))));
+    }
+    lowerBounds.push_back(index);
+    steps.push_back(step);
+  }
+
+  // create result ntensor
+  auto resNTens = builder.create<numba::ntensor::CreateArrayOp>(
+      loc, resNTensorType, dynamicDims, floatZero);
+
+  builder.create<mlir::scf::ParallelOp>(
+      loc, mlir::ValueRange(lowerBounds), mlir::ValueRange(upperBounds),
+      mlir::ValueRange(steps),
+      [&](mlir::OpBuilder &b, mlir::Location loc, mlir::ValueRange ivs) {
+        // load from l/rhs if needed and create necessary casts/bitwidth
+        // extensions
+        mlir::Value tensVal = b.create<numba::ntensor::LoadOp>(loc, nTensorVal, ivs);
+
+        if (tensVal.getType().isInteger(64)) {
+          tensVal = b.create<numba::util::SignCastOp>(loc, b.getIntegerType(tensVal.getType().getIntOrFloatBitWidth()), tensVal);
+          tensVal = b.create<mlir::arith::SIToFPOp>(loc, b.getF64Type(), tensVal);
+        }
+
+        // create arithmatic operation and store in result array
+        mlir::Value result = b.create<mlir::math::ExpOp>(loc, tensVal);
+        b.create<numba::ntensor::StoreOp>(loc, result, resNTens, ivs);
+      });
+  return ctx.context.createVar(context, resNTens);
+}
+
 static void
 setupPyBuilder(py::handle builder, mlir::OpBuilder &b,
                llvm::function_ref<py::object(mlir::Type)> createType) {
@@ -1484,6 +1547,7 @@ setupPyBuilder(py::handle builder, mlir::OpBuilder &b,
   py::setattr(builder, "_ifop", py::cpp_function(&ifopImpl));
 
   py::setattr(builder, "_array_type", py::cpp_function(&arrayTypeImpl));
+  py::setattr(builder, "_lower_exp", py::cpp_function(&lowerExpImpl));
 
   auto addType = [&](const char *name, mlir::Type type) {
     py::setattr(builder, name, createType(type));

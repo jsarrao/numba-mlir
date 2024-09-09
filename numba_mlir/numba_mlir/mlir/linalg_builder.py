@@ -196,6 +196,9 @@ class Builder:
     def array_type(self, dims, dtype):
         return self._array_type(self._context, dims, dtype)
 
+    def lower_exp(self, ntensor):
+        return self._lower_exp(self._context, ntensor)
+
 
 class FuncRegistry:
     def __init__(self):

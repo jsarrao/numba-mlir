@@ -370,7 +370,7 @@ def _gen_unary_ops():
         (reg_func("numpy.log", numpy.log), f64_type, lambda a, b: math.log(a)),
         (reg_func("numpy.sin", numpy.sin), f64_type, lambda a, b: helper_funcs.sin(a)),
         (reg_func("numpy.cos", numpy.cos), f64_type, lambda a, b: helper_funcs.cos(a)),
-        (reg_func("numpy.exp", numpy.exp), f64_type, lambda a, b: helper_funcs.exp(a)),
+        # (reg_func("numpy.exp", numpy.exp), f64_type, lambda a, b: helper_funcs.exp(a)),
         (reg_func("numpy.tanh", numpy.tanh), f64_type, lambda a, b: math.tanh(a)),
         (reg_func("numpy.abs", numpy.abs), complex_to_real, lambda a, b: abs(a)),
         (reg_func("numpy.negative", numpy.negative), None, lambda a, b: -a),
@@ -1434,6 +1434,10 @@ def hstack_impl(builder, arrays):
 @register_func("numpy.dstack", numpy.dstack)
 def dstack_impl(builder, arrays):
     return concat_impl(builder, arrays, 2)
+
+@register_func("numpy.exp", numpy.exp)
+def exp_impl(builder, array):
+    return builder.lower_exp(array)
 
 
 def _cov_get_ddof_func(ddof_is_none):

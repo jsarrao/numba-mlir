@@ -4,53 +4,54 @@
 
 #include "numba/ExecutionEngine/ExecutionEngine.hpp"
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/iterator.h"
-#include "llvm/ADT/iterator_range.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/Analysis/AssumptionCache.h"
-#include "llvm/Analysis/LoopNestAnalysis.h"
-#include "llvm/Analysis/LoopPass.h"
-#include "llvm/Analysis/MemorySSAUpdater.h"
-#include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/TargetLibraryInfo.h"
-#include "llvm/Analysis/TargetTransformInfo.h"
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/GraphTraits.h>
+#include <llvm/ADT/SetVector.h>
+#include <llvm/ADT/iterator.h>
+#include <llvm/ADT/iterator_range.h>
+#include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/Analysis/LoopNestAnalysis.h>
+#include <llvm/Analysis/LoopPass.h>
+#include <llvm/Analysis/MemorySSAUpdater.h>
+#include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/TargetLibraryInfo.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
-#include "llvm/ExecutionEngine/JITSymbol.h"
+#include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/ExecutionEngine/ObjectCache.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
 #include <llvm/ExecutionEngine/Orc/IRTransformLayer.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
-#include "llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/TapirUtils.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Metadata.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
-#include "llvm/IR/User.h"
-#include "llvm/IR/Value.h"
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Dominators.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instruction.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Metadata.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Type.h>
+#include <llvm/IR/User.h>
+#include <llvm/IR/Value.h>
 #include <llvm/MC/TargetRegistry.h>
-#include "llvm/Pass.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
+#include <llvm/Pass.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Support/Debug.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include "llvm/Support/raw_ostream.h"
 #include <llvm/Support/ToolOutputFile.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
-#include "llvm/Transforms/Utils/ValueMapper.h"
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/Transforms/Utils/TapirUtils.h>
+#include <llvm/Transforms/Utils/ValueMapper.h>
 
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/Support/FileUtilities.h>
@@ -59,14 +60,15 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Passes/PassBuilder.h>
-#include "llvm/Passes/PassPlugin.h"
+#include <llvm/Passes/PassPlugin.h>
 #include <llvm/Passes/StandardInstrumentations.h>
 
 #include <cassert>
 #include <cstddef>
-#include <iterator>
+#include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
-
+#include <iterator>
 
 #define DEBUG_TYPE "numba-execution-engine"
 
@@ -116,16 +118,20 @@ getPipelineTuningOptions(llvm::CodeGenOptLevel optLevelVal) {
 
 namespace llvm {
 struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
-  void splitLoop(Loop *l, Function &f, ScalarEvolution &se) {
-    // create list of all phi nodes in the loops header block. one of these
-    // should be the loop induction variable
+  bool splitLoop(Loop *l, Function &f, ScalarEvolution &se) {
     BasicBlock *header = l->getHeader();
     Module *m = f.getParent();
-    SmallVector<PHINode *, 0> PHICandidates;
+    LLVMContext &context = m->getContext();
+
+    // create list of all phi nodes in the loops header block. one of these
+    // should be the loop induction variable
+    SmallVector<PHINode *> PHICandidates;
     for (PHINode &pn : header->phis()) {
       if (pn.getNumIncomingValues() == 2) {
         for (uint i = 0; i < 2; i++) {
           if (ConstantInt *CI = dyn_cast<ConstantInt>(pn.getIncomingValue(i))) {
+            // if one of the incoming values is 0, the PHI is potentially the
+            // loop induction variable
             if (CI->isZero()) {
               PHICandidates.push_back(&pn);
             }
@@ -151,7 +157,7 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
       }
     }
     if (!canonInduct) {
-      return;
+      return false;
     }
 
     // if a canonical induction variable is found, it is fine to 'tapirify' and
@@ -166,51 +172,40 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
       auto *user = use.getUser();
       Instruction *userI = dyn_cast<Instruction>(user);
       if (userI->getOpcode() == Instruction::Add) {
-        auto *operand0 = userI->getOperand(0);
-        auto *operand1 = userI->getOperand(1);
-        if (isa<ConstantInt>(operand0)) {
-          // verify that the constantint operand has a value of 1
-          auto *o0Val = dyn_cast<ConstantInt>(operand0);
-          if (o0Val->getSExtValue() == 1) {
-            increment = userI;
-          }
-        }
-        if (isa<ConstantInt>(operand1)) {
-          // verify that the constantint operand has a value of 1
-          auto *o1Val = dyn_cast<ConstantInt>(operand1);
-          if (o1Val->getSExtValue() == 1) {
-            increment = userI;
+        // check if either operand is a ConstantInt of value 1
+        for (uint i = 0; i < 2; i++) {
+          if (auto *opVal = dyn_cast<ConstantInt>(userI->getOperand(i))) {
+            if (opVal->getSExtValue() == 1) {
+              increment = userI;
+            }
           }
         }
       }
     }
     if (!increment) {
-      return;
+      return false;
     }
 
     // find compare instruction that uses the increment instruction
-
-    Instruction *icmp;
+    Instruction *icmp = nullptr;
     for (Use &use : increment->uses()) {
-      auto *user = use.getUser();
-      Instruction *userI = dyn_cast<Instruction>(user);
-      if (isa<ICmpInst>(userI)) {
+      if (auto *userI = dyn_cast<ICmpInst>(use.getUser())) {
         icmp = userI;
       }
     }
     if (!icmp) {
-      return;
+      return false;
     }
 
     // find branch instruction that uses compare instruction
-    Instruction *branch;
+    Instruction *branch = nullptr;
     for (Use &use : icmp->uses()) {
-      auto *user = use.getUser();
-      Instruction *userI = dyn_cast<Instruction>(user);
-      branch = userI;
+      if (auto *userI = dyn_cast<BranchInst>(use.getUser())) {
+        branch = userI;
+      }
     }
     if (!branch) {
-      return;
+      return false;
     }
 
     // now we need to split the blocks so that we can add in the tapir
@@ -218,8 +213,8 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
     Instruction *firstSplitPoint;
     Instruction *secondSplitPoint;
 
-    // while the compare always ends up after the loop body, sometimes the
-    // increment can come before the loop body
+    // if increment comes before loop body, split points end up being
+    // slightly different
     if (increment->getNextNonDebugInstruction() == icmp) {
       firstSplitPoint = header->getFirstNonPHI();
       secondSplitPoint = increment;
@@ -228,29 +223,29 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
       secondSplitPoint = icmp;
     }
     if (!firstSplitPoint || !secondSplitPoint) {
-      return;
+      return false;
     }
 
     // splitting at the first split point
     BasicBlock *parent1 = firstSplitPoint->getParent();
     BasicBlock *body = parent1->splitBasicBlock(firstSplitPoint, "body", false);
     if (body == nullptr) {
-      return;
+      return false;
     }
 
     auto *parent2 = secondSplitPoint->getParent();
     BasicBlock *latch =
         parent2->splitBasicBlock(secondSplitPoint, "latch", false);
     if (latch == nullptr) {
-      return;
+      return false;
     }
 
-    // adding in tapir instructions
+    // add in tapir instructions
     // creating sync region
-    FunctionType *type =
-        FunctionType::get(Type::getTokenTy(m->getContext()), {}, false);
+    FunctionType *syncType =
+        FunctionType::get(Type::getTokenTy(context), {}, false);
     FunctionCallee syncStart =
-        m->getOrInsertFunction("llvm.syncregion.start", type);
+        m->getOrInsertFunction("llvm.syncregion.start", syncType);
     BasicBlock &entry = f.getEntryBlock();
     Instruction *insertPoint = entry.getFirstNonPHI();
     auto *syncRegInst = CallInst::Create(syncStart, {}, "syncreg", insertPoint);
@@ -269,33 +264,37 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
     ReattachInst::Create(latch, syncRegInst, latchPred);
 
     // add sync inst to block that the latch exits to
-    Instruction *exitFirstInst = exit->getFirstNonPHI();
-    BasicBlock *newExitBlock =
-        exit->splitBasicBlock(exitFirstInst, "exit", false);
-    Instruction *syncTerm = exit->getTerminator();
-    Instruction *syncInst =
-        SyncInst::Create(newExitBlock, syncRegInst, syncTerm);
-    syncTerm->eraseFromParent();
+    for (unsigned i = 0; i < branch->getNumOperands(); i++) {
+      Value *op = branch->getOperand(i);
+      if (isa<BasicBlock>(op) && op == exit) {
+        BasicBlock *newExit = BasicBlock::Create(context, "newexit", &f);
+        SyncInst::Create(exit, syncRegInst, newExit);
+        branch->setOperand(i, newExit);
+        exit->replacePhiUsesWith(branch->getParent(), newExit);
+      }
+    }
 
     // add neccessary tapir metadata to the loop
-    auto *Int32Ty = Type::getInt32Ty(branch->getContext());
-    SmallVector<Metadata *, 2> Ops;
-    Ops.push_back(
-        MDString::get(branch->getContext(), "tapir.loop.spawn.strategy"));
-    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(Int32Ty, TapirLoopHints::SpawningStrategy::ST_DAC)));
-    SmallVector<Metadata *, 2> targetMD;
-    targetMD.push_back(MDString::get(branch->getContext(), "tapir.loop.target"));
-    targetMD.push_back(ConstantAsMetadata::get(ConstantInt::get(Int32Ty, (uint64_t) TapirTargetID::Cuda)));
-    auto *node = MDTuple::get(branch->getContext(), Ops);
-    SmallVector<Metadata *, 2> nullMD;
-    auto *branchMD = MDNode::getDistinct(branch->getContext(), nullMD);
-    auto *tapirNode = MDNode::get(branch->getContext(), Ops);
-    auto *targetNode = MDNode::get(branch->getContext(), targetMD);
+    auto *Int32Ty = Type::getInt32Ty(context);
+    auto *branchMD = MDNode::getDistinct(context, {});
+    auto *tapirSpawnStrat = MDNode::get(
+        context, {MDString::get(context, "tapir.loop.spawn.strategy"),
+                  ConstantAsMetadata::get(ConstantInt::get(
+                      Int32Ty, TapirLoopHints::SpawningStrategy::ST_DAC))});
+    MDNode *targetID;
+    const char* tapirTarget = std::getenv("NM_TAPIRTARGET");
+    if (strcmp(tapirTarget, "opencilk") == 0) {
+      targetID = MDNode::get(context, {MDString::get(context, "tapir.loop.target"), ConstantAsMetadata::get(ConstantInt::get(Int32Ty, (uint64_t) TapirTargetID::OpenCilk))});
+    } else {
+      targetID = MDNode::get(context, {MDString::get(context, "tapir.loop.target"), ConstantAsMetadata::get(ConstantInt::get(Int32Ty, (uint64_t) TapirTargetID::Cuda))});
+    }
+
     branchMD->push_back(branchMD);
-    branchMD->push_back(tapirNode);
-    branchMD->push_back(targetNode);
-    
+    branchMD->push_back(tapirSpawnStrat);
+    branchMD->push_back(targetID);
+
     branch->setMetadata("llvm.loop", branchMD);
+    return true;
   }
 
   PreservedAnalyses run(Function &f, FunctionAnalysisManager &am) {
@@ -306,7 +305,11 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
       int numNested = (int)ln.getNumLoops();
       for (int i = numNested - 1; i >= 0; i--) {
         auto *nestedLoop = ln.getLoop(i);
-        splitLoop(nestedLoop, f, se);
+        if (splitLoop(nestedLoop, f, se)) {
+          // if splitLoop returns true, one of the loops in the loop nest has
+          // been tapirified, and we cannot tapirify any of the outer loops
+          break;
+        }
       }
     }
     return PreservedAnalyses::none();
@@ -318,10 +321,6 @@ struct tapirifyLoopPass : PassInfoMixin<tapirifyLoopPass> {
 struct replaceNRTAllocPass : PassInfoMixin<replaceNRTAllocPass> {
   PreservedAnalyses run(Function &f, FunctionAnalysisManager &am) {
     Module *m = f.getParent();
-
-    FunctionType *printType = FunctionType::get(Type::getVoidTy(m->getContext()), {Type::getInt64Ty(m->getContext())}, false);
-    FunctionCallee printFuncCallee = m->getOrInsertFunction("llvmPrintI64", printType);
-
     SmallVector<CallInst *> replaceList;
     for (BasicBlock &bb : f) {
       for (Instruction &i : bb) {
@@ -340,7 +339,13 @@ struct replaceNRTAllocPass : PassInfoMixin<replaceNRTAllocPass> {
 
       // replace call
       FunctionType *type = ci->getCalledFunction()->getFunctionType();
-      FunctionCallee memCallee = m->getOrInsertFunction("__kitcuda_mem_alloc_managed_numba", type);
+      FunctionCallee memCallee;
+      const char* tapirTarget = std::getenv("NM_TAPIRTARGET");
+      if (strcmp(tapirTarget, "opencilk") == 0) {
+        memCallee = m->getOrInsertFunction("__kitcuda_mem_alloc_managed_numba_oc", type);
+      } else {
+        memCallee = m->getOrInsertFunction("__kitcuda_mem_alloc_managed_numba_cu", type);
+      }
       CallInst *newCall = CallInst::Create(memCallee, {op0, op1});
       ReplaceInstWithInst(ci, newCall);
     }
@@ -353,94 +358,113 @@ struct replaceNRTAllocPass : PassInfoMixin<replaceNRTAllocPass> {
 
 static void runOptimizationPasses(llvm::Module &M, llvm::TargetMachine &TM) {
   llvm::CodeGenOptLevel optLevelVal = TM.getOptLevel();
+  // this needs to be modified for other users/systems
+  std::string bitcodeFile = "/vast/home/josephsarrao/kitinstall_t/lib/clang/18/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc";
 
+  llvm::errs() << "TM CodeGenOptLevel: " << (int) TM.getOptLevel() << '\n';
+
+  for (llvm::Function &func : M.functions()) {
+    if (func.getName() == "nmrtCreateAllocToken") {
+      func.addRetAttr(llvm::Attribute::AttrKind::NoAlias);
+      for (llvm::Use &use : func.uses()) {
+        if (auto *call = llvm::dyn_cast<llvm::CallInst>(use.getUser())) {
+          if (call->getCalledFunction() == &func) {
+            call->addRetAttr(llvm::Attribute::AttrKind::NoAlias);
+          }
+        }
+      }
+    }
+  }
+
+  // create first pass manager which will run O1, replaceNRTAllocPass, and
+  // taprifyLoopPass
   llvm::PipelineTuningOptions PTO;
   PTO.LoopUnrolling = false;
   PTO.LoopVectorization = false;
   PTO.LoopStripmine = false;
-
-  llvm::PassBuilder pb1(&TM, PTO);
+  llvm::PassBuilder PB1(&TM, PTO);
 
   llvm::Triple ModuleTriple(M.getTargetTriple());
   llvm::TargetLibraryInfoImpl TLII(ModuleTriple);
-  TLII.setTapirTarget(llvm::TapirTargetID::Cuda);
+  const char* tapirTarget = std::getenv("NM_TAPIRTARGET");
+  if (strcmp(tapirTarget, "opencilk") == 0) {
+    TLII.setTapirTarget(llvm::TapirTargetID::OpenCilk);
+    TLII.setTapirTargetOptions(std::make_unique<llvm::OpenCilkABIOptions>(bitcodeFile));
+  } else {
+    TLII.setTapirTarget(llvm::TapirTargetID::Cuda);
+  }
   TLII.addTapirTargetLibraryFunctions();
 
-  llvm::LoopAnalysisManager lam1;
-  llvm::FunctionAnalysisManager fam1;
-  llvm::CGSCCAnalysisManager cgam1;
-  llvm::ModuleAnalysisManager mam1;
-  fam1.registerPass([&] { return llvm::TargetLibraryAnalysis(TLII); });
+  llvm::LoopAnalysisManager LAM1;
+  llvm::FunctionAnalysisManager FAM1;
+  llvm::CGSCCAnalysisManager CGAM1;
+  llvm::ModuleAnalysisManager MAM1;
+  FAM1.registerPass([&] { return llvm::TargetLibraryAnalysis(TLII); });
 
-  pb1.registerModuleAnalyses(mam1);
-  pb1.registerCGSCCAnalyses(cgam1);
-  pb1.registerFunctionAnalyses(fam1);
-  pb1.registerLoopAnalyses(lam1);
-  pb1.crossRegisterProxies(lam1, fam1, cgam1, mam1);
-
-  llvm::ModulePassManager mpm1 = pb1.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1, false, TLII.hasTapirTarget());
-  mpm1.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::replaceNRTAllocPass()));
-  mpm1.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::tapirifyLoopPass()));
-
-  mpm1.run(M, mam1);
+  PB1.registerModuleAnalyses(MAM1);
+  PB1.registerCGSCCAnalyses(CGAM1);
+  PB1.registerFunctionAnalyses(FAM1);
+  PB1.registerLoopAnalyses(LAM1);
+  PB1.crossRegisterProxies(LAM1, FAM1, CGAM1, MAM1);
 
 
-  llvm::LoopAnalysisManager lam;
-  llvm::FunctionAnalysisManager fam;
-  llvm::CGSCCAnalysisManager cgam;
-  llvm::ModuleAnalysisManager mam;
+  llvm::ModulePassManager MPM1 = PB1.buildPerModuleDefaultPipeline(
+      llvm::OptimizationLevel::O1, false, TLII.hasTapirTarget());
+  MPM1.addPass(
+      llvm::createModuleToFunctionPassAdaptor(llvm::replaceNRTAllocPass()));
+  MPM1.addPass(
+      llvm::createModuleToFunctionPassAdaptor(llvm::tapirifyLoopPass()));
+  MPM1.run(M, MAM1);
+
+  // create second pass manager which will run optimization pass for optLevelVal
+  // (usually O2)
+  llvm::PipelineTuningOptions PTO2 = getPipelineTuningOptions(optLevelVal);
+  if (strcmp(tapirTarget, "opencilk") == 0) {
+    PTO2.LoopUnrolling = true;
+    PTO2.LoopVectorization = false;
+    PTO2.LoopStripmine = true;
+  } else {
+    PTO2.LoopUnrolling = false;
+    PTO2.LoopVectorization = false;
+    PTO2.LoopStripmine = false;
+  }
+  llvm::PassBuilder PB2(&TM, PTO2);
 
   llvm::TargetLibraryInfoImpl TLII2(ModuleTriple);
-  TLII2.setTapirTarget(llvm::TapirTargetID::Cuda);
-  TLII2.addTapirTargetLibraryFunctions();
-  fam.registerPass([&] { return llvm::TargetLibraryAnalysis(TLII2); });
-
-  llvm::PassInstrumentationCallbacks pic;
-  llvm::PrintPassOptions ppo;
-  ppo.Indent = false;
-  ppo.SkipAnalyses = false;
-  llvm::StandardInstrumentations si(M.getContext(), /*debugLogging*/ false,
-                                    /*verifyEach*/ true, ppo);
-
-  si.registerCallbacks(pic, &mam);
-
-  llvm::PipelineTuningOptions PTO2 = getPipelineTuningOptions(optLevelVal);
-  PTO2.LoopUnrolling = false;
-  PTO2.LoopVectorization = false;
-  PTO2.LoopStripmine = false;
-  llvm::PassBuilder pb(&TM, PTO2);
-
-
-  llvm::ModulePassManager mpm;
-
-  if (/*verify*/ true) {
-    pb.registerPipelineStartEPCallback(
-        [&](llvm::ModulePassManager &mpm, llvm::OptimizationLevel level) {
-          mpm.addPass(createModuleToFunctionPassAdaptor(llvm::VerifierPass()));
-        });
+  if (strcmp(tapirTarget, "opencilk") == 0) {
+    TLII2.setTapirTarget(llvm::TapirTargetID::OpenCilk);
+    TLII2.setTapirTargetOptions(std::make_unique<llvm::OpenCilkABIOptions>(bitcodeFile));
+  } else {
+    TLII2.setTapirTarget(llvm::TapirTargetID::Cuda);
   }
+  TLII2.addTapirTargetLibraryFunctions();
 
+  llvm::LoopAnalysisManager LAM2;
+  llvm::FunctionAnalysisManager FAM2;
+  llvm::CGSCCAnalysisManager CGAM2;
+  llvm::ModuleAnalysisManager MAM2;
+  FAM2.registerPass([&] { return llvm::TargetLibraryAnalysis(TLII2); });
 
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::PrintPassOptions PPO;
+  PPO.Indent = false;
+  PPO.SkipAnalyses = false;
+  llvm::StandardInstrumentations SI(M.getContext(), /*debugLogging*/ false,
+                                    /*verifyEach*/ true, PPO);
+  SI.registerCallbacks(PIC, &MAM2);
 
   // Register all the basic analyses with the managers.
-  pb.registerModuleAnalyses(mam);
-  pb.registerCGSCCAnalyses(cgam);
-  pb.registerFunctionAnalyses(fam);
-  pb.registerLoopAnalyses(lam);
-  pb.crossRegisterProxies(lam, fam, cgam, mam);
+  PB2.registerModuleAnalyses(MAM2);
+  PB2.registerCGSCCAnalyses(CGAM2);
+  PB2.registerFunctionAnalyses(FAM2);
+  PB2.registerLoopAnalyses(LAM2);
+  PB2.crossRegisterProxies(LAM2, FAM2, CGAM2, MAM2);
 
   llvm::OptimizationLevel level = mapToLevel(optLevelVal);
-
-  if (optLevelVal == llvm::CodeGenOptLevel::None) {
-    mpm = pb.buildO0DefaultPipeline(level);
-  } else {
-    if (TLII.hasTapirTarget()) {
-      llvm::errs() << "tlii hastapirtarget = true\n";
-    }
-    mpm = pb.buildPerModuleDefaultPipeline(level, false, TLII.hasTapirTarget());
-  }
-
-  mpm.run(M, mam);
+  llvm::ModulePassManager MPM2;
+  MPM2 =
+      PB2.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3, false, TLII2.hasTapirTarget());
+  MPM2.run(M, MAM2);
 }
 
 /// A simple object cache following Lang's LLJITWithObjectCache example.
@@ -634,12 +658,13 @@ numba::ExecutionEngine::loadModule(mlir::ModuleOp m) {
   std::unique_ptr<llvm::LLVMContext> ctx(new llvm::LLVMContext);
   auto llvmModule = mlir::translateModuleToLLVMIR(m, *ctx);
 
+  // options that kitsune likes, useful to mess around with these in the
+  // event of strange behavior
   llvmModule->setCodeModel(llvm::CodeModel::Large);
   llvmModule->setPICLevel(llvm::PICLevel::BigPIC);
   llvmModule->setPIELevel(llvm::PIELevel::Large);
   llvmModule->setDirectAccessExternalData(true);
 
-  llvm::DataLayout llvmDL = llvmModule->getDataLayout();
   if (!llvmModule)
     return makeStringError("could not convert to LLVM IR");
 
@@ -677,29 +702,127 @@ numba::ExecutionEngine::loadModule(mlir::ModuleOp m) {
 
   llvm::cantFail(jit->addIRModule(*dylib, std::move(tsm)));
 
-  llvm::SmallVector<std::string> kitcudaFns {"__cudaRegisterFatBinary", "__cudaRegisterFatBinaryEnd", "__cudaUnregisterFatBinary", "__kitcuda_use_occupancy_launch", "__kitcuda_initialize", "__kitcuda_destroy", "__kitcuda_launch_kernel", "__kitcuda_mem_gpu_prefetch", "__kitcuda_set_default_threads_per_blk", "__kitcuda_sync_thread_stream", "__kitcuda_mem_alloc_managed_numba"};
-  llvm::orc::MangleAndInterner Mangle(dylib->getExecutionSession(), jit->getDataLayout());
-
+  // add kitsune cuda functions to symbol map
+  llvm::SmallVector<std::string> kitcudaFns{
+      "__cudaRegisterFatBinary",
+      "__cudaRegisterFatBinaryEnd",
+      "__cudaUnregisterFatBinary",
+      "__kitcuda_use_occupancy_launch",
+      "__kitcuda_initialize",
+      "__kitcuda_destroy",
+      "__kitcuda_launch_kernel",
+      "__kitcuda_mem_gpu_prefetch",
+      "__kitcuda_set_default_threads_per_blk",
+      "__kitcuda_sync_thread_stream",
+      "__kitcuda_mem_alloc_managed_numba_cu",
+      "__kitcuda_mem_alloc_managed_numba_oc"};
+  llvm::orc::MangleAndInterner Mangle(dylib->getExecutionSession(),
+                                      jit->getDataLayout());
   static void *dlHandle = nullptr;
-  llvm::DenseMap<llvm::orc::SymbolStringPtr, llvm::orc::ExecutorSymbolDef> symMap;
-  if ((dlHandle = dlopen("/vast/home/josephsarrao/kitinstall_t/lib/clang/18/lib/libkitrt.so", RTLD_LAZY))) {
+  llvm::DenseMap<llvm::orc::SymbolStringPtr, llvm::orc::ExecutorSymbolDef>
+      symMap;
+  // this needs to be modified for other users/systems
+  if ((dlHandle = dlopen(
+           "/vast/home/josephsarrao/kitinstall_t/lib/clang/18/lib/libkitrt.so",
+           RTLD_LAZY))) {
     for (auto fn : kitcudaFns) {
       if (void *funcAddr = dlsym(dlHandle, fn.c_str())) {
-        
         llvm::JITSymbolFlags flags;
-        llvm::orc::ExecutorSymbolDef symDef(llvm::orc::ExecutorAddr::fromPtr(funcAddr), flags);
-        
+        llvm::orc::ExecutorSymbolDef symDef(
+            llvm::orc::ExecutorAddr::fromPtr(funcAddr), flags);
         symMap.insert({Mangle(fn.c_str()), std::move(symDef)});
-        
       } else {
-        llvm::report_fatal_error("error finding kitcuda function in libkitrt.so\n");
+        llvm::report_fatal_error(
+            "error finding kitcuda function in libkitrt.so\n");
       }
     }
   } else {
-      llvm::errs() << "Could not find dlHandle for libkitrt.so\n";
+    llvm::errs() << "Could not find dlHandle for libkitrt.so\n";
   }
-  llvm::cantFail(dylib->define(llvm::orc::absoluteSymbols(symMap)));
 
+  // add kitsune opencilk functions to symbol map
+  llvm::SmallVector<std::string> openCilkFns{
+      "Cilk_exception_handler",
+      "Cilk_set_return",
+      "cilkg_nproc",
+      "__pedigree_dprng_m_array",
+      "__cilkrts_check_exception_raise",
+      "__cilkrts_cleanup_fiber",
+      "__cilkrts_internal_exit_cilkified_root",
+      "__cilkrts_internal_invoke_cilkified_root",
+      "__cilkrts_need_to_cilkify",
+      "__cilkrts_sync",
+      "__cilkrts_use_extension",
+      "__emutls_v.__cilkrts_current_fh"};
+  dlHandle = nullptr;
+  // this needs to be modified for other users/systems
+  if ((dlHandle = dlopen(
+           "/vast/home/josephsarrao/kitinstall_t/lib/clang/18/lib/x86_64-unknown-linux-gnu/libopencilk.so",
+           RTLD_LAZY))) {
+    for (auto fn : openCilkFns) {
+      if (void *funcAddr = dlsym(dlHandle, fn.c_str())) {
+        llvm::JITSymbolFlags flags;
+        llvm::orc::ExecutorSymbolDef symDef(
+            llvm::orc::ExecutorAddr::fromPtr(funcAddr), flags);
+        symMap.insert({Mangle(fn.c_str()), std::move(symDef)});
+      } else {
+        llvm::report_fatal_error(
+            "error finding opencilk function in libopencilk.so\n");
+      }
+    }
+  } else {
+    llvm::errs() << "Could not find dlHandle for libopencilk.so\n";
+  }
+
+  // add opencilk personality functions to symbol map
+  llvm::SmallVector<std::string> openCilkPersFns{
+      "__cilk_personality_v0"};
+  dlHandle = nullptr;
+  // this needs to be modified for other users/systems
+  if ((dlHandle = dlopen(
+           "/vast/home/josephsarrao/kitinstall_t/lib/clang/18/lib/x86_64-unknown-linux-gnu/libopencilk-personality-c.so",
+           RTLD_LAZY))) {
+    for (auto fn : openCilkPersFns) {
+      if (void *funcAddr = dlsym(dlHandle, fn.c_str())) {
+        llvm::JITSymbolFlags flags;
+        llvm::orc::ExecutorSymbolDef symDef(
+            llvm::orc::ExecutorAddr::fromPtr(funcAddr), flags);
+        symMap.insert({Mangle(fn.c_str()), std::move(symDef)});
+      } else {
+        llvm::report_fatal_error(
+            "error finding opencilk function in libopencilk-personality-c.so\n");
+      }
+    }
+  } else {
+    llvm::errs() << "Could not find dlHandle for libopencilk-personality-cpp.so\n";
+  }
+
+  // add kitsune timer functions to symbol map
+  llvm::SmallVector<std::string> timerFns{
+      "startKitTimer",
+      "endKitTimer"};
+  dlHandle = nullptr;
+  // this needs to be modified for other users/systems
+  if ((dlHandle = dlopen(
+           "/vast/home/josephsarrao/python_experiments/numba-mlir/yw_therm/timerFuncs.so",
+           RTLD_LAZY))) {
+    for (auto fn : timerFns) {
+      if (void *funcAddr = dlsym(dlHandle, fn.c_str())) {
+        llvm::JITSymbolFlags flags;
+        llvm::orc::ExecutorSymbolDef symDef(
+            llvm::orc::ExecutorAddr::fromPtr(funcAddr), flags);
+        symMap.insert({Mangle(fn.c_str()), std::move(symDef)});
+      } else {
+        // llvm::errs() << fn << '\n';
+        llvm::report_fatal_error(
+            "error finding timer func\n");
+      }
+    }
+  } else {
+    llvm::errs() << "Could not find dlHandle for timerFuncs.so\n";
+  }
+
+  llvm::cantFail(dylib->define(llvm::orc::absoluteSymbols(symMap)));
   llvm::cantFail(jit->initialize(*dylib));
   return static_cast<ModuleHandle>(dylib);
 }

@@ -26,7 +26,6 @@ generate_export_header(${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
     ${MLIR_INCLUDE_DIRS}
-    # "/vast/home/josephsarrao/kitinstall_t/lib/clang/18/include"
     PRIVATE
     ${PROJECT_BINARY_DIR}
     )

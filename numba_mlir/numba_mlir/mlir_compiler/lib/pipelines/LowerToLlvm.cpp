@@ -66,7 +66,6 @@ namespace {
 static mlir::LowerToLLVMOptions getLLVMOptions(mlir::MLIRContext &context) {
   static llvm::DataLayout dl = []() {
     llvm::InitializeAllTargets();
-    
     auto triple = llvm::sys::getProcessTriple();
     std::string errStr;
     auto target = llvm::TargetRegistry::lookupTarget(triple, errStr);
@@ -739,7 +738,7 @@ struct ApplyFastmathFlags : public mlir::OpRewritePattern<Op> {
     auto parent = mlir::cast<mlir::LLVM::LLVMFuncOp>(op->getParentOp());
     bool changed = false;
 
-    rewriter.startRootUpdate(op);
+    rewriter.startOpModification(op);
     auto fmf = op.getFastmathFlags();
     getFastmathFlags(parent, [&](auto flag) {
       if (!mlir::LLVM::bitEnumContainsAny(fmf, flag)) {
@@ -750,9 +749,9 @@ struct ApplyFastmathFlags : public mlir::OpRewritePattern<Op> {
     if (changed) {
       op.setFastmathFlagsAttr(
           mlir::LLVM::FastmathFlagsAttr::get(op.getContext(), fmf));
-      rewriter.finalizeRootUpdate(op);
+      rewriter.finalizeOpModification(op);
     } else {
-      rewriter.cancelRootUpdate(op);
+      rewriter.cancelOpModification(op);
     }
 
     return mlir::success(changed);
